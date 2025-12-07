@@ -4,6 +4,7 @@ import java.util.regex.Pattern;
 
 import com.sonicether.soundphysics.utils.RaycastUtils;
 import com.sonicether.soundphysics.utils.SoundRateManager;
+import com.sonicether.soundphysics.utils.Utils;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.FluidTags;
 import org.joml.Vector3f;
@@ -261,8 +262,21 @@ public class SoundPhysics {
 
         double occlusionAccumulation = calculateOcclusion(soundPos, playerPos, category, sound);
 
-        directCutoff = (float) Math.exp(-occlusionAccumulation * absorptionCoeff);
-        float directGain = auxOnly ? 0F : (float) Math.pow(directCutoff, 0.1D);
+        // --- NEW: split occlusion into HF and LF "bands" using simple heuristics ---
+        double occlusionAccumulationHF = occlusionAccumulation;          // highs blocked a lot
+        double occlusionAccumulationLF = occlusionAccumulation * 0.35D;  // lows blocked less
+
+        float absorptionCoeffHF = (float) (SoundPhysicsMod.CONFIG.blockAbsorption.get() * 3D);
+        float absorptionCoeffLF = absorptionCoeffHF * 0.5F;
+
+        // High-frequency cutoff (muffling of highs)
+        float cutoffHF = (float) Math.exp(-occlusionAccumulationHF * absorptionCoeffHF);
+        // Low-frequency “cutoff” (really just used for gain)
+        float cutoffLF = (float) Math.exp(-occlusionAccumulationLF * absorptionCoeffLF);
+
+        // Use HF for direct lowpass cutoff, LF for perceived loudness
+        directCutoff = cutoffHF;
+        float directGain = auxOnly ? 0F : (float) Math.pow(cutoffLF, 0.3D);
 
         Loggers.logOcclusion("Direct cutoff: {}, direct gain: {}", directCutoff, directGain);
 
@@ -303,6 +317,9 @@ public class SoundPhysics {
             audioDirection.addDirectAirspace(directSharedAirspaceVector);
         }
 
+        float roomDistanceSum = 0F;
+        int roomDistanceHits = 0;
+
         for (int i = 0; i < numRays; i++) {
             float fiN = (float) i / numRays;
             float longitude = gAngle * (float) i * 1F;
@@ -316,6 +333,10 @@ public class SoundPhysics {
 
             if (rayHit.getType() == HitResult.Type.BLOCK) {
                 double rayLength = soundPos.distanceTo(rayHit.getLocation());
+
+                // Track first-hit distance to estimate room size
+                roomDistanceSum += (float) rayLength;
+                roomDistanceHits++;
 
                 // Additional bounces
                 BlockPos lastHitBlock = rayHit.getBlockPos();
@@ -393,6 +414,8 @@ public class SoundPhysics {
             }
         }
 
+        float avgFirstHitDist = roomDistanceHits > 0 ? (roomDistanceSum / roomDistanceHits) : maxDistance;
+
         for (int i = 0; i < bounceReflectivityRatio.length; i++) {
             bounceReflectivityRatio[i] = bounceReflectivityRatio[i] / numRays;
             Loggers.logEnvironment("Bounce reflectivity {}: {}", i, bounceReflectivityRatio[i]);
@@ -414,24 +437,38 @@ public class SoundPhysics {
         float sharedAirspaceWeight2 = Mth.clamp(sharedAirspace / 10F, 0F, 1F);
         float sharedAirspaceWeight3 = Mth.clamp(sharedAirspace / 10F, 0F, 1F);
 
-        sendCutoff0 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1F) * (1F - sharedAirspaceWeight0) + sharedAirspaceWeight0;
-        sendCutoff1 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1F) * (1F - sharedAirspaceWeight1) + sharedAirspaceWeight1;
-        sendCutoff2 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1F) * (1F - sharedAirspaceWeight2) + sharedAirspaceWeight2;
-        sendCutoff3 = (float) Math.exp(-occlusionAccumulation * absorptionCoeff * 1F) * (1F - sharedAirspaceWeight3) + sharedAirspaceWeight3;
+        sendCutoff0 = Utils.mix(1F, cutoffHF, sharedAirspaceWeight0);
+        sendCutoff1 = Utils.mix(1F, cutoffHF, sharedAirspaceWeight1);
+        sendCutoff2 = Utils.mix(1F, cutoffHF, sharedAirspaceWeight2);
+        sendCutoff3 = Utils.mix(1F, cutoffHF, sharedAirspaceWeight3);
 
         // Attempt to preserve directionality when airspace is shared by allowing some of the dry signal through but filtered
         float averageSharedAirspace = (sharedAirspaceWeight0 + sharedAirspaceWeight1 + sharedAirspaceWeight2 + sharedAirspaceWeight3) * 0.25F;
         directCutoff = Math.max((float) Math.pow(averageSharedAirspace, 0.5D) * 0.2F, directCutoff);
         directGain = auxOnly ? 0F : (float) Math.pow(directCutoff, 0.1D);
 
-        sendGain1 *= bounceReflectivityRatio[1];
-
+        if (bounceReflectivityRatio.length > 1) {
+            sendGain1 *= bounceReflectivityRatio[1];
+        }
         if (bounceReflectivityRatio.length > 2) {
             sendGain2 *= (float) Math.pow(bounceReflectivityRatio[2], 3D);
         }
         if (bounceReflectivityRatio.length > 3) {
             sendGain3 *= (float) Math.pow(bounceReflectivityRatio[3], 4D);
         }
+
+        //shorten reverb tail in small / enclosed rooms ---
+
+        float enclosure = 1F - Mth.clamp(sharedAirspace / 20F, 0F, 1F);
+
+        float smallRoomFactor = 1F - Mth.clamp(avgFirstHitDist / 12F, 0F, 1F);
+        float tailSuppress = Math.max(enclosure, smallRoomFactor);
+
+        float lateScale = Mth.lerp(tailSuppress, 1F, 0.4F); // keep some room body
+        float tailScale = Mth.lerp(tailSuppress, 1F, 0.05F); // almost kill the long tail
+
+        sendGain2 *= lateScale;
+        sendGain3 *= tailScale;
 
         sendGain0 = Mth.clamp(sendGain0, 0F, 1F);
         sendGain1 = Mth.clamp(sendGain1, 0F, 1F);
