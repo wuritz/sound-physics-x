@@ -10,7 +10,7 @@ public class Loggers {
 
     private static final Logger DEBUG_LOGGER = LogManager.getLogger(String.format(LOG_PREFIX, "Debug"));
     private static final Logger PROFILING_LOGGER = LogManager.getLogger(String.format(LOG_PREFIX, "Profiling"));
-    private static final Logger ENVIRONMENT_LOGGER = LogManager.getLogger(String.format(LOG_PREFIX, "Environmen"));
+    private static final Logger ENVIRONMENT_LOGGER = LogManager.getLogger(String.format(LOG_PREFIX, "Environment"));
     private static final Logger OCCLUSION_LOGGER = LogManager.getLogger(String.format(LOG_PREFIX, "Occlusion"));
     private static final Logger LOGGER = LogManager.getLogger(String.format(LOG_PREFIX, "General"));
 
